@@ -4,15 +4,77 @@ pragma solidity ^0.8.20;
 
 import "@chainlink/contracts/src/v0.8/shared/interfaces/AggregatorV3Interface.sol";
 
+/// @title Chainlink Price Feed Getter (CPFG)
+/// @notice Utility contract for fetching latest, batch, and historical prices from Chainlink AggregatorV3
+/// @dev All functions are view/pure — no state is stored in this contract
+/// @custom:security Always validate staleness before using prices in production
+
 contract CPFG {
 
-    /// @notice Get the latest price data from a Chainlink price feed
-    /// @param _priceFeed The address of the Chainlink AggregatorV3Interface price feed
-    /// @return price The latest price
-    /// @return decimals The number of decimals in the price feed
-    /// @return updatedAt The timestamp of the last update
-    /// @return roundId The round ID of the latest data
+    /// @notice Represents a complete snapshot of price data from a single feed
+    struct PriceData {
+        int256 price;       // Raw price (divide by 10**decimals for human-readable)
+        uint8 decimals;     // Feed decimal precision
+        uint256 updatedAt;  // Unix timestamp of last update
+        uint80 roundId;     // Round ID of this data point
+    }
+
+    /// @notice Represents a single historical price data point
+    struct HistoricalPoint {
+        uint80 roundId;     // Round ID of this historical point
+        int256 price;       // Price at this round
+        uint256 timestamp;  // Unix timestamp of this round
+    }
+
+    /// @notice Aggregated data bundle for a single feed — designed for one-call FE consumption
+    struct DashboardData {
+        PriceData latest;           // Latest price snapshot
+        bool isStale;               // Whether the feed exceeds maxAge
+        uint256 timeSinceUpdate;    // Seconds since last update
+        HistoricalPoint[] history;  // Last N historical rounds
+        int256 change1h;            // ~1h price change in bps
+        int256 change24h;           // ~24h price change in bps
+        int256 change7d;            // ~7d price change in bps
+    }
+
+    uint256 public constant DEFAULT_MAX_AGE = 1 hours;
+    uint256 public constant MAX_ROUNDS = 100;
+
+    error CPFG__InvalidFeedAddress();
+    error CPFG__InvalidPrice();
+    error CPFG__StalePriceFeed(address feed, uint256 updatedAt, uint256 maxAge);
+    error CPFG__EmptyFeedsArray();
+    error CPFG__ExceedsMaxRounds(uint256 requested, uint256 max);
+    error CPFG__InvalidThreshold();
+    error CPFG__PairNotRegistered(string pair);
+
+    /// @notice Checks whether a price feed's latest data exceeds the allowed age
+    /// @param _priceFeed Address of the AggregatorV3Interface price feed
+    /// @param _maxAge Maximum allowed age in seconds for the price data
+    /// @return isStale True if the feed data is older than _maxAge
+    /// @return timeSinceUpdate Number of seconds elapsed since the last update
+    function checkStaleness(address _priceFeed, uint256 _maxAge) public view returns (bool isStale, uint256 timeSinceUpdate) {
+        if (_priceFeed == address(0)) {
+            revert CPFG__InvalidFeedAddress();
+        }
+        AggregatorV3Interface priceFeed = AggregatorV3Interface(_priceFeed);
+        (, , uint256 updatedAt, ,) = priceFeed.latestRoundData();
+        timeSinceUpdate = block.timestamp - updatedAt;
+        isStale = timeSinceUpdate > _maxAge;
+        return (isStale, timeSinceUpdate);
+    }
+
+    /// @notice Fetches the latest price data from a single Chainlink price feed
+    /// @dev Validates feed address, price positivity, and staleness before returning
+    /// @param _priceFeed Address of the AggregatorV3Interface price feed
+    /// @return price Latest raw price from the feed
+    /// @return decimals Number of decimals used by the feed
+    /// @return updatedAt Unix timestamp of the last update
+    /// @return roundId Round ID of the latest data point
     function getLatestPrice(address _priceFeed) public view returns (int256, uint8, uint256, uint80) {
+        if (_priceFeed == address(0)) {
+            revert CPFG__InvalidFeedAddress();
+        }
         AggregatorV3Interface priceFeed = AggregatorV3Interface(_priceFeed);
         (uint80 roundId, int256 price, , uint256 updatedAt, ) = priceFeed.latestRoundData();
         return (price, priceFeed.decimals(), updatedAt, roundId);
@@ -21,19 +83,110 @@ contract CPFG {
     /// @notice Get the latest prices from multiple Chainlink price feeds
     /// @param _priceFeeds Array of Chainlink AggregatorV3Interface price feed addresses
     /// @return prices Array of latest prices corresponding to each feed
-    function getBatchPrices(address[] memory _priceFeeds) public view returns (int256[] memory) {
-        int256[] memory prices = new int256[](_priceFeeds.length);
-        for (uint i = 0; i < _priceFeeds.length; i++) {
-            (prices[i], , , )    = getLatestPrice(_priceFeeds[i]);
+    function getBatchPrices(address[] memory _priceFeeds) public view returns (PriceData[] memory) {
+        if (_priceFeeds.length == 0) {
+            revert CPFG__EmptyFeedsArray();
         }
-        return prices;
+        PriceData[] memory results = new PriceData[](_priceFeeds.length);
+        for (uint i = 0; i < _priceFeeds.length; i++) {
+            (results[i].price, results[i].decimals, results[i].updatedAt, results[i].roundId) = getLatestPrice(_priceFeeds[i]);
+        }
+        return results;
     }
 
-    /// @notice Get historical price data from a Chainlink price feed
-    /// @param _priceFeed The address of the Chainlink AggregatorV3Interface price feed
-    /// @param _roundData The round ID to query historical data for
-    function getHistoricalPrices(address _priceFeed, uint256 _roundData) public {
+    /// @notice Derives a cross price between two feeds (e.g. BTC/ETH from BTC/USD and ETH/USD)
+    /// @dev Result is scaled to decimalsResult precision. Assumes both feeds share the same quote currency.
+    /// @param _feedA Address of the numerator feed (e.g. BTC/USD)
+    /// @param _feedB Address of the denominator feed (e.g. ETH/USD)
+    /// @param _decimalsResult Desired decimal precision for the derived price
+    /// @return derivedPrice The cross price scaled to _decimalsResult
+    function getDerivedPrice(address _feedA, address _feedB, uint8 _decimalsResult) public view returns (int256 derivedPrice) {
+        (int256 priceA, uint8 decimalsA, ,) = getLatestPrice(_feedA);
+        (int256 priceB, uint8 decimalsB, ,) = getLatestPrice(_feedB);
+        if (priceA <= 0 || priceB <= 0) {
+            revert CPFG__InvalidPrice();
+        }
+        // Scale priceA to the desired decimals and adjust for the difference in feed decimals
+        int256 scaledPriceA = priceA * int256(10 ** _decimalsResult) * int256(10 ** decimalsB) / int256(10 ** decimalsA);
+        derivedPrice = scaledPriceA / priceB;
+        return derivedPrice;
+    }
 
-    }    
+    /// @notice Fetches the last N rounds of historical price data from a feed
+    /// @dev Iterates backwards from the latest round ID. Stops early if round data is unavailable.
+    /// @param _priceFeed Address of the AggregatorV3Interface price feed
+    /// @param _numRounds Number of historical rounds to fetch (max: MAX_ROUNDS)
+    /// @return history Array of HistoricalPoint structs ordered from latest to oldest
+    function getHistoricalPrices(address _priceFeed, uint80 _numRounds) public view returns (HistoricalPoint[] memory) {
+        if (_priceFeed == address(0)) {
+            revert CPFG__InvalidFeedAddress();
+        }
+        if (_numRounds == 0 || _numRounds > MAX_ROUNDS) {
+            revert CPFG__ExceedsMaxRounds(_numRounds, MAX_ROUNDS);
+        }
+        AggregatorV3Interface priceFeed = AggregatorV3Interface(_priceFeed);
+        (, , , , uint80 latestRoundId) = priceFeed.latestRoundData();
+        HistoricalPoint[] memory history = new HistoricalPoint[](_numRounds);
+        for (uint80 i = 0; i < _numRounds; i++) {
+            (uint80 roundId, int256 price, , uint256 updatedAt, ) = priceFeed.getRoundData(latestRoundId - i);
+            history[i] = HistoricalPoint({price: price, timestamp: updatedAt, roundId: roundId});
+        }
+        return history;
+    }
 
+    /// @notice Approximates price changes over ~1h, ~24h, and ~7d by walking backwards through rounds
+    /// @dev Changes are expressed in basis points (bps). 100 bps = 1%.
+    ///      Round intervals are not fixed — results are approximate based on timestamp proximity.
+    /// @param _priceFeed Address of the AggregatorV3Interface price feed
+    /// @return change1h Approximate price change over the last ~1 hour in bps
+    /// @return change24h Approximate price change over the last ~24 hours in bps
+    /// @return change7d Approximate price change over the last ~7 days in bps
+    function getPriceChanges(address _priceFeed) public view returns (int256 change1h, int256 change24h, int256 change7d) {
+        (int256 currentPrice, , , uint80 latestRoundId) = getLatestPrice(_priceFeed);
+
+        // Define target timestamps
+        uint256 t1h = block.timestamp - 1 hours;
+        uint256 t24h = block.timestamp - 24 hours;
+        uint256 t7d = block.timestamp - 7 days;
+
+        // Initialize prices to currentPrice as fallback
+        int256 price1h = currentPrice;
+        int256 price24h = currentPrice;
+        int256 price7d = currentPrice;
+        bool found1h;
+        bool found24h;
+        bool found7d;
+
+        AggregatorV3Interface priceFeed = AggregatorV3Interface(_priceFeed);
+
+        // Walk backwards through rounds to find the closest data points for each interval
+        for (uint80 i = 1; i <= MAX_ROUNDS; i++) {
+            uint80 currentRoundId = latestRoundId - i;
+            try priceFeed.getRoundData(currentRoundId) returns (uint80, int256 price, uint256, uint256 updatedAt, uint80) {
+                if (!found1h && updatedAt <= t1h) {
+                    price1h = price;
+                    found1h = true;
+                }
+                if (!found24h && updatedAt <= t24h) {
+                    price24h = price;
+                    found24h = true;
+                }
+                if (!found7d && updatedAt <= t7d) {
+                    price7d = price;
+                    found7d = true;
+                }
+                if (found1h && found24h && found7d) {
+                    break;
+                }
+            } catch {
+                continue;
+            }
+        }
+
+        // Calculate changes in basis points (bps)
+        change1h = ((currentPrice - price1h) * 10000) / price1h;
+        change24h = ((currentPrice - price24h) * 10000) / price24h;
+        change7d = ((currentPrice - price7d) * 10000) / price7d;
+        return (change1h, change24h, change7d);
+    }
 }
