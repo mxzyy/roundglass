@@ -3,13 +3,38 @@
 pragma solidity ^0.8.20;
 
 import "@chainlink/contracts/src/v0.8/shared/interfaces/AggregatorV3Interface.sol";
+import "@openzeppelin/contracts/access/Ownable.sol";
 
 /// @title Chainlink Price Feed Getter (CPFG)
 /// @notice Utility contract for fetching latest, batch, and historical prices from Chainlink AggregatorV3
 /// @dev All functions are view/pure — no state is stored in this contract
 /// @custom:security Always validate staleness before using prices in production
 
-contract CPFG {
+contract CPFG is Ownable {
+
+    /// @notice Registry mapping from pair name (e.g. "BTC/USD") to Chainlink feed address
+    mapping(string => address) public registry;
+
+    constructor() Ownable(msg.sender) {}
+
+    /// @notice Registers a Chainlink feed address for a given pair name
+    /// @param _pair Human-readable pair name (e.g. "BTC/USD")
+    /// @param _feed Address of the AggregatorV3Interface price feed
+    function registerFeed(string memory _pair, address _feed) external onlyOwner {
+        if (_feed == address(0)) {
+            revert CPFG__InvalidFeedAddress();
+        }
+        registry[_pair] = _feed;
+    }
+
+    /// @notice Removes a registered feed for a given pair name
+    /// @param _pair Human-readable pair name to remove
+    function removeFeed(string memory _pair) external onlyOwner {
+        if (registry[_pair] == address(0)) {
+            revert CPFG__PairNotRegistered(_pair);
+        }
+        delete registry[_pair];
+    }
 
     /// @notice Represents a complete snapshot of price data from a single feed
     struct PriceData {
@@ -47,6 +72,7 @@ contract CPFG {
     error CPFG__ExceedsMaxRounds(uint256 requested, uint256 max);
     error CPFG__InvalidThreshold();
     error CPFG__PairNotRegistered(string pair);
+    error CPFG__FeedCallFailed(string pair);
 
     /// @notice Checks whether a price feed's latest data exceeds the allowed age
     /// @param _priceFeed Address of the AggregatorV3Interface price feed
@@ -232,4 +258,54 @@ contract CPFG {
         actualTimeRange = latestTimestamp - oldestTimestamp;
         return (twapPrice, roundsSampled, actualTimeRange);
     }
-}
+
+    /// @notice Checks whether the current price has deviated from a reference price beyond a threshold
+    /// @dev Deviation is calculated as: ((currentPrice - lastKnownPrice) * 10000) / lastKnownPrice
+    /// @param _priceFeed Address of the AggregatorV3Interface price feed
+    /// @param _lastKnownPrice Reference price to compare against (must be > 0)
+    /// @param _thresholdBps Deviation threshold in basis points (e.g. 500 = 5%)
+    /// @return exceeded True if absolute deviation exceeds _thresholdBps
+    /// @return deviationBps Signed deviation in basis points (negative = price dropped)
+    function checkDeviation( address _priceFeed, int256 _lastKnownPrice, uint256 _thresholdBps ) public view returns (bool exceeded, int256 deviationBps) {
+        if (_lastKnownPrice <= 0) {
+            revert CPFG__InvalidPrice();
+        }
+        if (_thresholdBps == 0) {
+            revert CPFG__InvalidThreshold();
+        }
+
+        (int256 currentPrice, , ,) = getLatestPrice(_priceFeed);
+        if (currentPrice <= 0) {
+            revert CPFG__InvalidPrice();
+        }
+        deviationBps = ((currentPrice - _lastKnownPrice) * 10000) / _lastKnownPrice;
+        int256 absDeviation = deviationBps >= 0 ? deviationBps : -deviationBps;
+        exceeded = absDeviation > int256(_thresholdBps);
+        return (exceeded, deviationBps);
+    }
+
+    /// @notice Resolves a pair name to its feed address and metadata from the on-chain registry
+    /// @dev Requires the pair to be registered via the registry mapping
+    /// @param _pair Human-readable pair name (e.g. "BTC/USD")
+    /// @return feedAddress The registered Chainlink feed address for this pair
+    /// @return decimals Decimal precision of the feed
+    /// @return description Description string returned by the feed
+    function getFeedInfo(string memory _pair) public view returns (address feedAddress, uint8 decimals, string memory description) {
+        feedAddress = registry[_pair];
+        if (feedAddress == address(0)) {
+            revert CPFG__PairNotRegistered(_pair);
+        }
+        AggregatorV3Interface feed = AggregatorV3Interface(feedAddress);
+        try feed.decimals() returns (uint8 _decimals) {
+            decimals = _decimals;
+        } catch {
+            revert CPFG__FeedCallFailed(_pair);
+        }
+        try feed.description() returns (string memory _description) {
+            description = _description;
+        } catch {
+            revert CPFG__FeedCallFailed(_pair);
+        }
+        return (feedAddress, decimals, description);
+    }
+}   
