@@ -189,4 +189,47 @@ contract CPFG {
         change7d = ((currentPrice - price7d) * 10000) / price7d;
         return (change1h, change24h, change7d);
     }
+
+    /// @notice Calculates the Time-Weighted Average Price over a given time window
+    /// @dev Walks backwards through rounds until timeWindow is covered or MAX_ROUNDS is reached.
+    ///      Weights each round equally (simple average, not time-weighted by duration).
+    /// @param _priceFeed Address of the AggregatorV3Interface price feed
+    /// @param _timeWindow Duration in seconds to calculate the TWAP over
+    /// @return twapPrice The average price over the sampled rounds
+    /// @return roundsSampled Number of rounds included in the calculation
+    /// @return actualTimeRange Actual time range covered by the sampled rounds
+    function getTWAP( address _priceFeed, uint256 _timeWindow ) public view returns (int256 twapPrice, uint256 roundsSampled, uint256 actualTimeRange) {
+        if (_priceFeed == address(0)) {
+            revert CPFG__InvalidFeedAddress();
+        }
+        AggregatorV3Interface priceFeed = AggregatorV3Interface(_priceFeed);
+        (uint80 latestRoundId, int256 latestPrice, , uint256 latestTimestamp, ) = priceFeed.latestRoundData();
+
+        uint256 cutoffTime = latestTimestamp - _timeWindow;
+        int256 priceSum = 0;
+        roundsSampled = 0;
+        uint256 oldestTimestamp = latestTimestamp;
+
+        for (uint80 i = 0; i < MAX_ROUNDS; i++) {
+            uint80 currentRoundId = latestRoundId - i;
+            try priceFeed.getRoundData(currentRoundId) returns (uint80, int256 price, uint256, uint256 updatedAt, uint80) {
+                if (updatedAt < cutoffTime) {
+                    break;
+                }
+                priceSum += price;
+                roundsSampled++;
+                oldestTimestamp = updatedAt;
+            } catch {
+                break;
+            }
+        }
+
+        if (roundsSampled == 0) {
+            return (latestPrice, 1, 0);
+        }
+
+        twapPrice = priceSum / int256(roundsSampled);
+        actualTimeRange = latestTimestamp - oldestTimestamp;
+        return (twapPrice, roundsSampled, actualTimeRange);
+    }
 }
