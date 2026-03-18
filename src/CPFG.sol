@@ -308,4 +308,16 @@ contract CPFG is Ownable {
         }
         return (feedAddress, decimals, description);
     }
+
+    function getDashboardData(address _priceFeed, uint256 _maxAge, uint80 _numRounds) public view returns (DashboardData memory) {
+        if (_priceFeed == address(0)) {
+            revert CPFG__InvalidFeedAddress();
+        }
+        DashboardData memory data;
+        (data.latest.price, data.latest.decimals, data.latest.updatedAt, data.latest.roundId) = getLatestPrice(_priceFeed);
+        (data.isStale, data.timeSinceUpdate) = checkStaleness(_priceFeed, _maxAge);
+        data.history = getHistoricalPrices(_priceFeed, _numRounds);
+        (data.change1h, data.change24h, data.change7d) = getPriceChanges(_priceFeed);
+        return data;
+    }
 }   
