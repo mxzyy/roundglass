@@ -4,6 +4,7 @@ pragma solidity ^0.8.20;
 
 import "@chainlink/contracts/src/v0.8/shared/interfaces/AggregatorV3Interface.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
+import "./FeedRegistry.sol";
 
 /// @title Chainlink Price Feed Getter (CPFG)
 /// @notice Utility contract for fetching latest, batch, and historical prices from Chainlink AggregatorV3
@@ -12,10 +13,12 @@ import "@openzeppelin/contracts/access/Ownable.sol";
 
 contract CPFG is Ownable {
 
-    /// @notice Registry mapping from pair name (e.g. "BTC/USD") to Chainlink feed address
-    mapping(string => address) public registry;
+    FeedRegistry private immutable i_registry;
 
-    constructor() Ownable(msg.sender) {}
+
+    constructor(FeedRegistry _registry) Ownable(msg.sender) {
+        i_registry = _registry;
+    }
 
     /// @notice Registers a Chainlink feed address for a given pair name
     /// @param _pair Human-readable pair name (e.g. "BTC/USD")
@@ -24,16 +27,16 @@ contract CPFG is Ownable {
         if (_feed == address(0)) {
             revert CPFG__InvalidFeedAddress();
         }
-        registry[_pair] = _feed;
+        i_registry.registerFeed(_pair, _feed);
     }
 
     /// @notice Removes a registered feed for a given pair name
     /// @param _pair Human-readable pair name to remove
     function removeFeed(string memory _pair) external onlyOwner {
-        if (registry[_pair] == address(0)) {
+        if (i_registry.isRegisteredFeed(_pair) == false) {
             revert CPFG__PairNotRegistered(_pair);
         }
-        delete registry[_pair];
+        i_registry.removeFeed(_pair);
     }
 
     /// @notice Represents a complete snapshot of price data from a single feed
@@ -291,17 +294,17 @@ contract CPFG is Ownable {
     /// @return decimals Decimal precision of the feed
     /// @return description Description string returned by the feed
     function getFeedInfo(string memory _pair) public view returns (address feedAddress, uint8 decimals, string memory description) {
-        feedAddress = registry[_pair];
-        if (feedAddress == address(0)) {
+        address feed = i_registry.getFeedAddress(_pair);
+        if (feed == address(0)) {
             revert CPFG__PairNotRegistered(_pair);
         }
-        AggregatorV3Interface feed = AggregatorV3Interface(feedAddress);
-        try feed.decimals() returns (uint8 _decimals) {
+        AggregatorV3Interface feedInterface = AggregatorV3Interface(feed);
+        try feedInterface.decimals() returns (uint8 _decimals) {
             decimals = _decimals;
         } catch {
             revert CPFG__FeedCallFailed(_pair);
         }
-        try feed.description() returns (string memory _description) {
+        try feedInterface.description() returns (string memory _description) {
             description = _description;
         } catch {
             revert CPFG__FeedCallFailed(_pair);

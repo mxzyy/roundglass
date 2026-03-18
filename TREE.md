@@ -4,17 +4,17 @@ chainlink-pricefeed-getter/
 ├── remappings.txt
 │
 ├── src/
-│   ├── ChainlinkPriceFeedGetter.sol      ← Main contract (entry point)
+│   ├── CPFG.sol      ← Main contract (entry point)
 │   ├── FeedRegistry.sol                   ← On-chain pair registry (owner-managed)
 │   ├── PriceDerivator.sol                 ← Derived price calculation logic
 │   ├── StalenessChecker.sol               ← Staleness validation logic
 │   ├── HistoricalSampler.sol              ← Historical round sampling + % change calc
 │   ├── TWAPCalculator.sol                 ← Time-weighted average price logic
 │   └── interfaces/
-│       └── IChainlinkPriceFeedGetter.sol  ← Interface for main contract
+│       └── ICPFG.sol  ← Interface for main contract
 │
 ├── test/
-│   ├── ChainlinkPriceFeedGetter.t.sol     ← Main integration tests
+│   ├── CPFG.t.sol     ← Main integration tests
 │   ├── FeedRegistry.t.sol
 │   ├── PriceDerivator.t.sol
 │   ├── StalenessChecker.t.sol

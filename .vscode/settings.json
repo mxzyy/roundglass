@@ -1,0 +1,9 @@
+{
+  "solidity.packageDefaultDependenciesDirectory": "lib",
+  "solidity.packageDefaultDependenciesContractsDirectory": "",
+  "solidity.remappings": [
+    "@chainlink/contracts/=/home/user/github/chainlink-pricefeed-getter/lib/chainlink-brownie-contracts/contracts/",
+    "@openzeppelin/contracts/=/home/user/github/chainlink-pricefeed-getter/lib/openzeppelin-contracts/contracts/",
+    "forge-std/=/home/user/github/chainlink-pricefeed-getter/lib/forge-std/src/"
+  ]
+}
