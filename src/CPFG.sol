@@ -309,7 +309,7 @@ contract CPFG is Ownable {
         } catch {
             revert CPFG__FeedCallFailed(_pair);
         }
-        return (feedAddress, decimals, description);
+        return (feed, decimals, description);
     }
 
     function getDashboardData(address _priceFeed, uint256 _maxAge, uint80 _numRounds) public view returns (DashboardData memory) {
