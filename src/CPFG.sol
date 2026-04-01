@@ -312,6 +312,12 @@ contract CPFG is Ownable {
         return (feed, decimals, description);
     }
 
+    /// @notice Retrieves a comprehensive dashboard snapshot for a given Chainlink price feed.
+    /// @dev Aggregates latest price, staleness check, historical prices, and price changes into a single call.
+    /// @param _priceFeed The address of the Chainlink AggregatorV3Interface price feed.
+    /// @param _maxAge The maximum acceptable age (in seconds) before the feed is considered stale.
+    /// @param _numRounds The number of historical rounds to retrieve.
+    /// @return A `DashboardData` struct containing latest price, staleness info, historical prices, and price change percentages (in bps).
     function getDashboardData(address _priceFeed, uint256 _maxAge, uint80 _numRounds) public view returns (DashboardData memory) {
         if (_priceFeed == address(0)) {
             revert CPFG__InvalidFeedAddress();
